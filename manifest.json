@@ -1,7 +1,7 @@
 {
   "id": "flymd-translate-selection",
   "name": "翻译选中文本(translate-selection)",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "author": "afo",
   "description": "选择文本后翻译(Select and translate)",
   "main": "main.js",

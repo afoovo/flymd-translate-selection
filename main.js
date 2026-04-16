@@ -64,6 +64,7 @@ const state = {
     resultPanel: null,
     selectionHandler: null,
     mousedownHandler: null,
+    textareaObserver: null,
     isTranslating: false,
     lastSelection: null,
     lastSelectionRect: null,
@@ -86,7 +87,6 @@ async function loadSettings(context) {
             state.settings = {...defaultSettings, ...saved};
         }
     } catch (e) {
-        console.error('加载翻译插件设置失败:', e);
     }
 }
 
@@ -123,61 +123,80 @@ function getSelectedText(ctx) {
 
 // 获取选区的位置信息
 function getSelectionRect() {
-    // 首先尝试使用 window.getSelection（更可靠的视口坐标）
+    // 方法1：使用 window.getSelection（适用于所见和阅读模式）
     try {
         const sel = window.getSelection && window.getSelection();
         if (sel && sel.rangeCount > 0) {
             const range = sel.getRangeAt(0);
             if (range) {
                 const rect = range.getBoundingClientRect();
-                if (rect && rect.width > 0 && rect.height > 0) {
+                if (rect && typeof rect.top === 'number' && typeof rect.left === 'number' && rect.top > 10 && rect.left > 10) {
                     return rect;
                 }
             }
         }
     } catch (e) {
-        // 忽略异常
     }
 
-    // 备选：使用 context.getSourceCaretRect
+    // 方法2：通过 textarea 计算选区位置
     try {
         const ctx = state.context;
-        if (ctx && typeof ctx.getSourceCaretRect === 'function') {
-            const r = ctx.getSourceCaretRect();
-            if (r && typeof r.top === 'number' && typeof r.left === 'number') {
-                // 尝试找到编辑器容器（flyMD 使用 .editor-shell 和 .editor-surface）
-                const editorShell = document.querySelector('.editor-shell');
-                const editorSurface = document.querySelector('.editor-surface');
-                const editorElement = document.querySelector('.editor');
+        const selection = ctx && ctx.getSelection ? ctx.getSelection() : null;
+        
+        if (selection && selection.start !== selection.end) {
+            const textarea = document.querySelector('.editor-shell textarea, .editor-surface textarea, .editor textarea');
+            if (textarea) {
+                const value = textarea.value;
+                const currentStart = selection.start;
+                const currentEnd = selection.end;
                 
-                // 优先使用 editor-surface（包含文本的区域）
-                let targetContainer = editorSurface || editorShell || editorElement;
+                const style = window.getComputedStyle(textarea);
+                let lh = parseFloat(style.lineHeight || '');
+                if (!lh || Number.isNaN(lh)) {
+                    lh = (parseFloat(style.fontSize || '16') || 16) * 1.6;
+                }
+                const padTop = parseFloat(style.paddingTop || '0') || 0;
+                const padLeft = parseFloat(style.paddingLeft || '0') || 0;
                 
-                if (targetContainer) {
-                    const containerRect = targetContainer.getBoundingClientRect();
-                    
-                    // 检查容器是否可见
-                    if (containerRect.width > 0 && containerRect.height > 0) {
-                        // 将内部坐标转换为视口坐标
-                        return {
-                            top: containerRect.top + r.top,
-                            left: containerRect.left + r.left,
-                            bottom: containerRect.top + r.bottom,
-                            right: containerRect.left + r.right,
-                            width: r.width,
-                            height: r.height
-                        };
+                const tab4 = (s) => s.replace(/\t/g, '    ');
+                
+                // 估算单字符宽度
+                const measureCharWidth = () => {
+                    try {
+                        const font = `${style.fontStyle} ${style.fontVariant} ${style.fontWeight} ${style.fontSize} / ${style.lineHeight} ${style.fontFamily}`;
+                        const canvas = document.createElement('canvas');
+                        const ctx2d = canvas.getContext('2d');
+                        if (!ctx2d) return 8;
+                        ctx2d.font = font;
+                        const w = ctx2d.measureText('0').width;
+                        return (w && w > 0) ? w : 8;
+                    } catch {
+                        return 8;
                     }
-                }
+                };
                 
-                // 如果找不到容器，且 top 值在合理范围内，使用原始坐标
-                if (r.top >= 0 && r.top < 10000) {
-                    return r;
-                }
+                const ch = measureCharWidth();
+                const edRect = textarea.getBoundingClientRect();
+                
+                // 计算选区结束位置的行列
+                const textBeforeEnd = value.substring(0, currentEnd);
+                const linesBeforeEnd = textBeforeEnd.split('\n');
+                const endLineIdx = Math.max(0, linesBeforeEnd.length - 1);
+                const endColLen = tab4(linesBeforeEnd[endLineIdx] || '').length;
+                
+                // 使用选区结束位置作为按钮显示的基准点
+                const top = edRect.top + padTop + endLineIdx * lh - textarea.scrollTop;
+                const left = edRect.left + padLeft + endColLen * ch - textarea.scrollLeft;
+                
+                // 计算选中区域的宽度和高度
+                const selectedLines = value.substring(currentStart, currentEnd).split('\n');
+                const height = selectedLines.length * lh;
+                const width = tab4(selectedLines[selectedLines.length - 1] || '').length * ch;
+                
+                return { top, left, bottom: top + height, right: left + width, width, height };
             }
         }
     } catch (e) {
-        // 忽略异常
     }
 
     return null;
@@ -206,12 +225,7 @@ function shouldShowInCurrentMode() {
         return true;
     }
     
-    // 浮动按钮模式：检查是否在预览模式
-    const currentMode = getCurrentMode();
-    if (currentMode === 'preview') {
-        return false;
-    }
-    
+    // 浮动按钮模式：在所有编辑模式下都显示（包括源码、所见即所得、预览）
     return true;
 }
 
@@ -488,14 +502,8 @@ function showFloatingBtn(rect) {
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
 
-    // 验证 rect 是否有效
+    // 验证 rect 是否有效（允许宽高为0，只要有有效坐标）
     if (!rect || typeof rect.top !== 'number' || typeof rect.left !== 'number') {
-        hideFloatingBtn();
-        return;
-    }
-
-    // 检查 rect 是否有有效的尺寸（选区可能无效）
-    if (rect.width === 0 && rect.height === 0) {
         hideFloatingBtn();
         return;
     }
@@ -544,9 +552,21 @@ function showResultPanel(originalText, translatedText) {
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
 
+    // 验证 rect 是否有效
+    if (!rect || typeof rect.top !== 'number' || typeof rect.left !== 'number') {
+        // 使用默认位置（屏幕中央偏上）
+        const defaultLeft = Math.max(8, (viewportWidth - 320) / 2);
+        const defaultTop = Math.max(8, viewportHeight * 0.3);
+        panel.style.left = `${defaultLeft}px`;
+        panel.style.top = `${defaultTop}px`;
+        panel.style.display = 'block';
+        hideFloatingBtn();
+        return;
+    }
+
     // 显示在选区下方，避免遮挡选中文本
-    let left = rect ? rect.left : 100;
-    let top = rect ? rect.bottom + margin : 100;
+    let left = rect.left;
+    let top = rect.bottom + margin;
 
     panel.style.display = 'block';
     
@@ -560,7 +580,7 @@ function showResultPanel(originalText, translatedText) {
     
     // 如果下方空间不足，显示在选区上方
     if (top + panelRect.height > viewportHeight - 8) {
-        top = rect ? rect.top - panelRect.height - margin : 8;
+        top = rect.top - panelRect.height - margin;
     }
     if (top < 8) top = 8;
 
@@ -670,14 +690,11 @@ function registerContextMenu() {
         state.disposeContextMenu = null;
     }
 
-    // 右键菜单始终注册，不受 triggerMode 限制
+    // 右键菜单始终注册
     state.disposeContextMenu = state.context.addContextMenuItem({
         label: t('翻译选中文本', 'Translate Selection'),
         icon: '🌐',
         condition: (ctx) => {
-            if (!shouldShowInCurrentMode()) {
-                return false;
-            }
             const text = getSelectedText(ctx);
             return text.length > 0;
         },
@@ -691,7 +708,6 @@ function registerContextMenu() {
 function registerSelectionWatcher() {
     // 防止重复注册
     if (state.selectionHandler) {
-        console.warn('[Translate Plugin] Selection watcher already registered');
         return;
     }
 
@@ -711,6 +727,36 @@ function registerSelectionWatcher() {
         }
     } catch {
     }
+
+    // 为 textarea 添加额外的事件监听（源码模式）
+    // textarea 不会触发 selectionchange 事件，需要监听其他事件
+    const addTextareaListeners = () => {
+        const textareas = document.querySelectorAll('.editor-shell textarea, .editor-surface textarea, .editor textarea');
+        textareas.forEach(textarea => {
+            // 监听鼠标抬起事件（选择文本后）
+            textarea.addEventListener('mouseup', handler);
+            // 监听键盘抬起事件（键盘选择文本后）
+            textarea.addEventListener('keyup', handler);
+            // 监听从其他位置聚焦到 textarea 的情况
+            textarea.addEventListener('focus', handler);
+        });
+    };
+    
+    // 初始添加监听
+    addTextareaListeners();
+    
+    // 使用 MutationObserver 监听 DOM 变化，处理动态创建的 textarea
+    const observer = new MutationObserver(() => {
+        addTextareaListeners();
+    });
+    
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+    
+    // 保存 observer 引用以便清理
+    state.textareaObserver = observer;
 
     const mousedownHandler = (e) => {
         if (state.resultPanel && !state.resultPanel.contains(e.target) &&
@@ -859,11 +905,8 @@ export async function openSettings(context) {
 export async function activate(context) {
     // 防止重复激活
     if (state.activated) {
-        console.warn('[Translate Plugin] Already activated, skipping...');
         return;
     }
-    
-    console.log('[Translate Plugin] Activating...');
     state.context = context;
     await loadSettings(context);
 
@@ -898,13 +941,11 @@ export async function activate(context) {
 
     state.activated = true;
     context.ui.notice(t('翻译插件已加载', 'Translate plugin loaded'), 'ok');
-    console.log('[Translate Plugin] Activated successfully');
 }
 
 // 插件停用
 export function deactivate() {
-    console.log('[Translate Plugin] Deactivating...');
-    
+
     // 清除防抖定时器
     if (state.debounceTimer) {
         clearTimeout(state.debounceTimer);
@@ -915,6 +956,12 @@ export function deactivate() {
     if (state.selectionHandler) {
         document.removeEventListener('selectionchange', state.selectionHandler);
         state.selectionHandler = null;
+    }
+    
+    // 移除 MutationObserver
+    if (state.textareaObserver) {
+        state.textareaObserver.disconnect();
+        state.textareaObserver = null;
     }
     
     // 移除鼠标按下监听
@@ -961,6 +1008,4 @@ export function deactivate() {
     state.lastSelectionRect = null;
     state.isTranslating = false;
     state.activated = false;
-    
-    console.log('[Translate Plugin] Deactivated successfully');
 }
