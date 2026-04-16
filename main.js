@@ -44,8 +44,7 @@ function t(zh, en) {
 const defaultSettings = {
     targetLang: 'zh-Hans',
     sourceLang: 'auto',
-    triggerMode: 'floating',
-    showInModes: ['edit', 'wysiwyg']
+    triggerMode: 'contextMenu'
 };
 
 // 语言列表
@@ -74,7 +73,9 @@ const state = {
     accessToken: null,
     tokenExpireAt: -1,
     // 防抖相关
-    debounceTimer: null
+    debounceTimer: null,
+    // 防止重复激活
+    activated: false
 };
 
 // 加载设置
@@ -200,17 +201,18 @@ function getCurrentMode() {
 
 // 检查当前模式是否应该显示翻译按钮
 function shouldShowInCurrentMode() {
-    const currentMode = getCurrentMode();
-    const {showInModes} = state.settings;
-
-    // 分屏模式（源码+预览）时，按源码模式处理
-    // 注意：flymdGetSplitPreviewEnabled 直接挂在 window 上，不是 window.flymd
-    const isSplit = typeof window.flymdGetSplitPreviewEnabled === 'function' && window.flymdGetSplitPreviewEnabled();
-    if (isSplit) {
-        return showInModes.includes('edit') || showInModes.includes('wysiwyg');
+    // 右键菜单模式下，所有模式都支持
+    if (state.settings.triggerMode === 'contextMenu') {
+        return true;
     }
-
-    return showInModes.includes(currentMode);
+    
+    // 浮动按钮模式：检查是否在预览模式
+    const currentMode = getCurrentMode();
+    if (currentMode === 'preview') {
+        return false;
+    }
+    
+    return true;
 }
 
 // ==================== Microsoft Edge 翻译 API ====================
@@ -392,6 +394,12 @@ function escapeHtml(text) {
 
 // 创建悬浮翻译按钮
 function createFloatingBtn() {
+    // 先清理可能存在的旧实例
+    const existingBtn = document.getElementById(TOOLBAR_ID);
+    if (existingBtn && existingBtn.parentNode) {
+        existingBtn.parentNode.removeChild(existingBtn);
+    }
+    
     if (state.floatingBtn && state.floatingBtn.parentNode) {
         return;
     }
@@ -441,6 +449,12 @@ function createFloatingBtn() {
 
 // 创建翻译结果面板
 function createResultPanel() {
+    // 先清理可能存在的旧实例
+    const existingPanel = document.getElementById(RESULT_ID);
+    if (existingPanel && existingPanel.parentNode) {
+        existingPanel.parentNode.removeChild(existingPanel);
+    }
+    
     if (state.resultPanel && state.resultPanel.parentNode) {
         return;
     }
@@ -656,10 +670,7 @@ function registerContextMenu() {
         state.disposeContextMenu = null;
     }
 
-    if (state.settings.triggerMode !== 'contextMenu') {
-        return;
-    }
-
+    // 右键菜单始终注册，不受 triggerMode 限制
     state.disposeContextMenu = state.context.addContextMenuItem({
         label: t('翻译选中文本', 'Translate Selection'),
         icon: '🌐',
@@ -678,7 +689,11 @@ function registerContextMenu() {
 
 // 注册选区监听
 function registerSelectionWatcher() {
-    if (state.selectionHandler) return;
+    // 防止重复注册
+    if (state.selectionHandler) {
+        console.warn('[Translate Plugin] Selection watcher already registered');
+        return;
+    }
 
     const handler = () => {
         updateFloatingBtnVisibility();
@@ -755,8 +770,6 @@ export async function openSettings(context) {
     </option>`
   ).join('');
   
-  const showInModes = state.settings.showInModes || ['edit', 'wysiwyg'];
-  
   dialog.innerHTML = `
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
       <h3 style="margin: 0; font-size: 16px; font-weight: 600;">🌐 ${t('翻译设置', 'Translate Settings')}</h3>
@@ -764,28 +777,12 @@ export async function openSettings(context) {
     </div>
     
     <div style="margin-bottom: 14px;">
-      <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 500;">${t('触发方式', 'Trigger Mode')}</label>
-      <select id="tp-trigger-mode" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #ddd; font-size: 14px; box-sizing: border-box;">
-        <option value="floating" ${state.settings.triggerMode === 'floating' ? 'selected' : ''}>${t('选中文本后自动显示按钮', 'Auto-show button on selection')}</option>
-        <option value="contextMenu" ${state.settings.triggerMode === 'contextMenu' ? 'selected' : ''}>${t('放在右键菜单中', 'In context menu')}</option>
-      </select>
-    </div>
-    
-    <div style="margin-bottom: 14px;">
-      <label style="display: block; font-size: 13px; margin-bottom: 6px; font-weight: 500;">${t('显示模式', 'Show in Modes')}</label>
-      <div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 6px; border: 1px solid #ddd; background: rgba(0,0,0,0.02);">
-        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;">
-          <input type="checkbox" class="tp-mode-cb" value="edit" ${showInModes.includes('edit') ? 'checked' : ''} style="cursor: pointer;">
-          <span>${t('源码模式/分屏模式', 'Source Mode')}</span>
-        </label>
-        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;">
-          <input type="checkbox" class="tp-mode-cb" value="wysiwyg" ${showInModes.includes('wysiwyg') ? 'checked' : ''} style="cursor: pointer;">
-          <span>${t('所见模式', 'WYSIWYG Mode')}</span>
-        </label>
-        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;">
-          <input type="checkbox" class="tp-mode-cb" value="preview" ${showInModes.includes('preview') ? 'checked' : ''} style="cursor: pointer;">
-          <span>${t('阅读模式', 'Preview Mode')}</span>
-        </label>
+      <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;">
+        <input type="checkbox" id="tp-auto-show-btn" ${state.settings.triggerMode === 'floating' ? 'checked' : ''} style="cursor: pointer;">
+        <span>${t('选中文本后自动显示翻译按钮', 'Auto-show button on selection')}</span>
+      </label>
+      <div style="margin-top: 6px; padding: 6px 8px; background: #e3f2fd; border: 1px solid #2196f3; border-radius: 4px; font-size: 11px; color: #0d47a1;">
+        💡 ${t('提示：右键菜单选项需在左侧"扩展菜单管理"中设置。', 'Tip: The right-click menu option needs to be enabled in the "Extended Menu Management" on the left')}
       </div>
     </div>
     
@@ -820,10 +817,9 @@ export async function openSettings(context) {
     const closeBtn = dialog.querySelector('#tp-close');
     const cancelBtn = dialog.querySelector('#tp-cancel');
     const saveBtn = dialog.querySelector('#tp-save');
-    const triggerModeSelect = dialog.querySelector('#tp-trigger-mode');
+    const autoShowBtnCheckbox = dialog.querySelector('#tp-auto-show-btn');
     const sourceLangSelect = dialog.querySelector('#tp-source-lang');
     const targetLangSelect = dialog.querySelector('#tp-target-lang');
-    const modeCheckboxes = dialog.querySelectorAll('.tp-mode-cb');
 
     const cleanup = () => {
         if (overlay.parentNode) {
@@ -838,37 +834,36 @@ export async function openSettings(context) {
     };
 
     saveBtn.onclick = async () => {
-        const newTriggerMode = triggerModeSelect.value;
+        const newTriggerMode = autoShowBtnCheckbox.checked ? 'floating' : 'contextMenu';
         const oldTriggerMode = state.settings.triggerMode;
-
-        const newShowInModes = [];
-        modeCheckboxes.forEach(cb => {
-            if (cb.checked) {
-                newShowInModes.push(cb.value);
-            }
-        });
 
         await saveSettings(context, {
             triggerMode: newTriggerMode,
             sourceLang: sourceLangSelect.value,
-            targetLang: targetLangSelect.value,
-            showInModes: newShowInModes
+            targetLang: targetLangSelect.value
         });
 
         cleanup();
         context.ui.notice(t('设置已保存', 'Settings saved'), 'ok');
 
-        if (newTriggerMode !== oldTriggerMode) {
-            if (newTriggerMode === 'contextMenu') {
-                hideFloatingBtn();
-            }
-            registerContextMenu();
+        // 切换模式时更新浮动按钮显示状态
+        if (newTriggerMode === 'contextMenu') {
+            hideFloatingBtn();
+        } else {
+            updateFloatingBtnVisibility();
         }
     };
 }
 
 // 插件激活
 export async function activate(context) {
+    // 防止重复激活
+    if (state.activated) {
+        console.warn('[Translate Plugin] Already activated, skipping...');
+        return;
+    }
+    
+    console.log('[Translate Plugin] Activating...');
     state.context = context;
     await loadSettings(context);
 
@@ -901,39 +896,71 @@ export async function activate(context) {
         window.removeEventListener('flymd:localeChanged', onLocaleChanged);
     };
 
+    state.activated = true;
     context.ui.notice(t('翻译插件已加载', 'Translate plugin loaded'), 'ok');
+    console.log('[Translate Plugin] Activated successfully');
 }
 
 // 插件停用
 export function deactivate() {
+    console.log('[Translate Plugin] Deactivating...');
+    
+    // 清除防抖定时器
     if (state.debounceTimer) {
         clearTimeout(state.debounceTimer);
         state.debounceTimer = null;
     }
+    
+    // 移除选区监听
     if (state.selectionHandler) {
         document.removeEventListener('selectionchange', state.selectionHandler);
         state.selectionHandler = null;
     }
+    
+    // 移除鼠标按下监听
     if (state.mousedownHandler) {
         document.removeEventListener('mousedown', state.mousedownHandler);
         state.mousedownHandler = null;
     }
+    
+    // 移除右键菜单
     if (state.disposeContextMenu) {
         state.disposeContextMenu();
         state.disposeContextMenu = null;
     }
+    
+    // 移除语言切换监听
     if (state.disposeLocaleListener) {
         state.disposeLocaleListener();
         state.disposeLocaleListener = null;
     }
-    if (state.floatingBtn && state.floatingBtn.parentNode) {
-        state.floatingBtn.parentNode.removeChild(state.floatingBtn);
-    }
-    if (state.resultPanel && state.resultPanel.parentNode) {
-        state.resultPanel.parentNode.removeChild(state.resultPanel);
-    }
+    
+    // 强制移除所有可能的浮动按钮实例
+    const existingBtns = document.querySelectorAll(`#${TOOLBAR_ID}`);
+    existingBtns.forEach(btn => {
+        if (btn.parentNode) {
+            btn.parentNode.removeChild(btn);
+        }
+    });
+    
+    // 强制移除所有可能的结果面板实例
+    const existingPanels = document.querySelectorAll(`#${RESULT_ID}`);
+    existingPanels.forEach(panel => {
+        if (panel.parentNode) {
+            panel.parentNode.removeChild(panel);
+        }
+    });
+    
+    // 清空状态
     state.floatingBtn = null;
     state.resultPanel = null;
     state.context = null;
     state.accessToken = null;
+    state.tokenExpireAt = -1;
+    state.lastSelection = null;
+    state.lastSelectionRect = null;
+    state.isTranslating = false;
+    state.activated = false;
+    
+    console.log('[Translate Plugin] Deactivated successfully');
 }
